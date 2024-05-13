@@ -1,0 +1,275 @@
+---
+title: "salesModeling"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(tsibble)
+library(feasts)
+library(fable)
+library(tsibbledata)
+library(fpp3)
+library(plotly)
+library(fable.prophet)
+```
+
+# Reading train
+
+```{r}
+train <- read.csv("created_train.csv")
+```
+
+### Making train a tsibble
+
+```{r}
+#Dropping duplicated column 
+train$X <- NULL
+train$id <- NULL
+train$onpromotion <- NULL
+
+
+#Parsing date field into date type
+train$date <- as.Date(train$date)
+
+#Making it a tsibble
+train <- as_tsibble(train,
+                    index = date,
+                    key = c(store_nbr,family))
+
+head(train,2)
+```
+
+# Reading test
+
+```{r}
+test <- read.csv("created_test.csv")
+```
+
+### Making test a tsibble
+
+```{r}
+#Dropping duplicated column 
+test$X <- NULL
+test$id <- NULL
+test$onpromotion <- NULL
+
+#Parsing date field into date type
+test$date <- as.Date(test$date)
+
+#Making it a tsibble
+test <- as_tsibble(test,
+                    index = date,
+                    key = c(store_nbr,family))
+
+head(test,2)
+```
+
+# Univariate forecasting
+
+#### Filling gaps
+
+```{r}
+has_gaps(train, .full = TRUE)
+```
+
+```{r}
+#We don't have data on christmas
+scan_gaps(train)
+```
+
+```{r}
+train <- train |> 
+  fill_gaps(.full = TRUE)
+
+scan_gaps(train)
+```
+
+```{r}
+scan_gaps(test)
+```
+
+```{r}
+train <- train |> 
+  fill(sales, .direction = "downup")
+```
+
+#### Visualization of total sales
+
+```{r}
+train |> 
+  index_by(date) |> 
+  summarise(totalSales = sum(sales)) |> 
+  autoplot()
+```
+
+#### Total Sales seasonality
+
+```{r}
+train |> 
+  index_by(date) |> 
+  summarise(totalSales = sum(sales)) |> gg_season() |> 
+  ggplotly()
+  
+```
+
+```{r}
+train <- train |> 
+  index_by(date) |> 
+  summarise(totalSales = sum(sales))
+```
+
+```{r}
+train
+```
+
+#### Total sales decomposition
+
+```{r}
+train |> 
+  model(stl = STL(totalSales, robust = TRUE)) |> 
+  components() |> 
+  autoplot() |> 
+  ggplotly()
+```
+
+```{r}
+train |>  model(stl = STL(totalSales, robust = TRUE)) |> 
+  components()
+```
+
+```{r}
+test <- test |> 
+  index_by(date) |> 
+  summarise(totalSales = sum(sales))
+
+```
+
+#Modeling with grouped data to see which model performs the best Then we'll model with the normal data to get real predictions
+
+```{r}
+#sarima = ARIMA(sales) # R will fit a SARIMA Value
+model <- train |>
+  model(
+    snaive = SNAIVE(totalSales),
+    prophet = prophet(totalSales ~ growth("linear") + season("month",type="multiplicative")),
+    harmonic = ARIMA(totalSales ~ fourier(K = 3) + PDQ(0,0,0))
+    ) |> 
+  mutate(combined = (snaive + prophet + harmonic)/3)
+
+model
+```
+
+```{r}
+#Forecast for SNAIVE
+fc <- select(model, snaive) |> forecast(h=15)
+sqrt(mean((log1p(fc$.mean) - log1p(test$totalSales))^2))
+```
+
+```{r}
+#Forecast for prophet
+fc <- select(model, prophet) |> forecast(h=15)
+sqrt(mean((log1p(fc$.mean) - log1p(test$totalSales))^2))
+```
+
+```{r}
+#Forecast for harmonic
+fc <- select(model, harmonic) |> forecast(h=15)
+sqrt(mean((log1p(fc$.mean) - log1p(test$totalSales))^2))
+```
+
+```{r}
+#Forecast for combined
+fc <- select(model, combined) |> forecast(h=15)
+sqrt(mean((log1p(fc$.mean) - log1p(test$totalSales))^2))
+```
+
+# Predicting ungrouped values
+
+```{r}
+fc <- model |> 
+  forecast(h=15)
+
+fc
+
+```
+
+```{r}
+actualValues <- test$totalSales
+predictedValues <- fc$.mean
+
+# Calculate RMSLE
+rmsle <- sqrt(mean((log1p(predictedValues) - log1p(actualValues))^2))
+
+rmsle
+```
+
+# Competition
+
+```{r}
+competitionTrain = read.csv("train.csv")
+competitionTest = read.csv("competitionTest.csv")
+```
+
+```{r}
+competitionTrain$X <- NULL
+competitionTrain$id <- NULL
+competitionTrain$onpromotion <- NULL
+
+
+#Parsing date field into date type
+competitionTrain$date <- as.Date(competitionTrain$date)
+
+shorterCompetitionTrain <- competitionTrain |> 
+  filter(year(date) > 2015)
+
+#Making it a tsibble
+shorterCompetitionTrain <- as_tsibble(shorterCompetitionTrain,
+                    index = date,
+                    key = c(store_nbr,family)) 
+
+shorterCompetitionTrain <- shorterCompetitionTrain %>%
+  mutate(flag_column = ifelse(day(date) == 15 | (day(date) == days_in_month(date)), 1, 0))
+
+
+```
+
+```{r}
+shorterCompetitionTrain <- fill_gaps(shorterCompetitionTrain)
+shorterCompetitionTrain <- shorterCompetitionTrain %>%
+  fill(sales, .direction = "down")
+```
+
+
+
+```{r}
+#Dropping duplicated column 
+competitionTest$X <- NULL
+competitionTest$id <- NULL
+competitionTest$onpromotion <- NULL
+
+#Parsing date field into date type
+competitionTest$date <- as.Date(competitionTest$date)
+
+#Making it a tsibble
+competitionTest <- as_tsibble(competitionTest,
+                    index = date,
+                    key = c(store_nbr,family))
+
+
+```
+
+
+
+
+```{r}
+model <- shorterCompetitionTrain |>
+  model(ARIMA(sales ~ flag_column))
+```
+
+
+```{r}
+fc <- model |> forecast()
+```
+
